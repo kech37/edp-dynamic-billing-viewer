@@ -1,0 +1,6 @@
+.DS_Store
+node_modules/
+
+# Monthly XLSX reports contain personal data (name, contract, CPE) —
+# kept out of version control. Remove this line if you want them tracked.
+reports/

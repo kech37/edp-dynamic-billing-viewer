@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Energy Consumption Viewer</title>
+<link rel="stylesheet" href="styles.css">
+<script src="lib/xlsx.full.min.js"></script>
+<script src="lib/chart.umd.min.js"></script>
+</head>
+<body>
+<div id="drop-overlay"><div>Drop XLSX reports to import</div></div>
+
+<header>
+  <div class="header-inner">
+    <div>
+      <h1>⚡ Energy Consumption Viewer</h1>
+      <p id="coverage" class="subtitle">No data yet — upload your EDP reports to get started.</p>
+    </div>
+    <div class="header-actions">
+      <button id="btn-upload" class="btn primary">＋ Add reports</button>
+      <button id="btn-export" class="btn">Export backup</button>
+      <button id="btn-import" class="btn">Import backup</button>
+      <input type="file" id="file-input" accept=".xlsx,.xls" multiple hidden>
+      <input type="file" id="json-input" accept=".json" hidden>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div id="empty-state" class="dropzone" hidden>
+    <div class="dz-icon">📄</div>
+    <p><strong>Drag &amp; drop your XLSX reports here</strong><br>or click to choose files. Every file with a <code>POMIE_*</code> tab is parsed and added to your history — re-uploading the same period is safe (duplicates are merged).</p>
+  </div>
+
+  <div id="dashboard" hidden>
+    <div id="month-filter" class="chips"></div>
+
+    <section class="kpis">
+      <div class="card kpi"><div class="kpi-label">Total consumption</div><div class="kpi-value" id="kpi-total">–</div><div class="kpi-sub" id="kpi-days">–</div></div>
+      <div class="card kpi"><div class="kpi-label">Average per day</div><div class="kpi-value" id="kpi-avg-day">–</div><div class="kpi-sub" id="kpi-avg-night">–</div></div>
+      <div class="card kpi"><div class="kpi-label">Estimated energy cost</div><div class="kpi-value" id="kpi-cost">–</div><div class="kpi-sub">OMIE × (1 + losses), excl. grid tariffs &amp; fees</div></div>
+      <div class="card kpi"><div class="kpi-label">Average price paid</div><div class="kpi-value" id="kpi-price">–</div><div class="kpi-sub" id="kpi-pomie">–</div></div>
+      <div class="card kpi"><div class="kpi-label">Peak hour</div><div class="kpi-value" id="kpi-peak">–</div><div class="kpi-sub" id="kpi-peak-sub">–</div></div>
+    </section>
+
+    <section class="grid-2">
+      <div class="card">
+        <h2>Monthly consumption &amp; cost <span class="hint">(click a bar to filter)</span></h2>
+        <div class="chart-wrap"><canvas id="chart-monthly"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>Average day profile <span class="hint">(kWh per hour)</span></h2>
+        <div class="chart-wrap"><canvas id="chart-hourly"></canvas></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 id="daily-title">Daily consumption</h2>
+      <div class="chart-wrap tall"><canvas id="chart-daily"></canvas></div>
+    </section>
+
+    <section class="card">
+      <h2>When do I use energy? <span class="hint">(average kWh by weekday × hour)</span></h2>
+      <div id="heatmap"></div>
+    </section>
+
+    <section class="card">
+      <h2>Imported reports</h2>
+      <table id="files-table">
+        <thead><tr><th>File</th><th>Period covered</th><th>Readings</th><th>Imported on</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="danger-row"><button id="btn-clear" class="btn danger">Clear all data</button></div>
+    </section>
+  </div>
+</main>
+
+<div id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
