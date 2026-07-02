@@ -36,9 +36,15 @@
   <div id="dashboard" hidden>
     <div class="filter-row">
       <div id="month-filter" class="chips"></div>
-      <div class="segmented" id="period-mode" title="Group by calendar month or by EDP billing period (25th → 24th)">
-        <button data-mode="month" class="active">Calendar months</button>
-        <button data-mode="billing">Billing periods (25→24)</button>
+      <div class="filter-side">
+        <label class="toggle" id="exclude-toggle" hidden>
+          <input type="checkbox" id="exclude-check">
+          <span id="exclude-label">Exclude tagged days</span>
+        </label>
+        <div class="segmented" id="period-mode" title="Group by calendar month or by EDP billing period (25th → 24th)">
+          <button data-mode="month" class="active">Calendar months</button>
+          <button data-mode="billing">Billing periods (25→24)</button>
+        </div>
       </div>
     </div>
 
@@ -74,12 +80,46 @@
         <div class="chart-wrap"><canvas id="chart-price"></canvas></div>
       </div>
       <div class="card">
-        <h2>Top consumption days</h2>
+        <h2>Load-shifting simulator <span class="hint">(what if I ran appliances at cheaper hours?)</span></h2>
+        <div class="shift-controls">
+          <span>Moving</span>
+          <input id="shift-kwh" type="number" value="1" min="0.1" step="0.1"> <span>kWh/day from</span>
+          <select id="shift-from"></select>
+          <span>to</span>
+          <select id="shift-to"></select>
+        </div>
+        <div id="shift-result" class="shift-result"></div>
+        <p id="shift-note" class="insight"></p>
+      </div>
+    </section>
+
+    <section class="grid-2">
+      <div class="card">
+        <h2>Top consumption days <span class="hint">(tag unusual days — e.g. EV charging — to exclude them from averages)</span></h2>
         <table id="top-days" class="data-table">
-          <thead><tr><th>Date</th><th>kWh</th><th>Est. cost</th><th>vs daily average</th></tr></thead>
+          <thead><tr><th>Date</th><th>kWh</th><th>Est. cost</th><th>vs average</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
+        <div class="tag-summary">
+          <span id="tag-summary-text"></span>
+          <button id="btn-autotag" class="btn mini">Auto-tag spike days</button>
+        </div>
       </div>
+      <div class="card">
+        <h2>Base load trend <span class="hint">(always-on power per period)</span></h2>
+        <div class="chart-wrap"><canvas id="chart-baseload"></canvas></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Consumption vs temperature <span class="hint">(daily totals, tagged days excluded)</span></h2>
+      <div class="weather-controls">
+        <input id="weather-city" type="text" placeholder="City (e.g. Porto)">
+        <button id="btn-weather" class="btn">Load weather data</button>
+        <span id="weather-status" class="hint"></span>
+      </div>
+      <p id="weather-insight" class="insight"></p>
+      <div class="chart-wrap"><canvas id="chart-weather"></canvas></div>
     </section>
 
     <section class="card">
@@ -100,10 +140,12 @@
 
     <section class="card">
       <h2>Imported reports</h2>
-      <table id="files-table">
-        <thead><tr><th>File</th><th>Period covered</th><th>Readings</th><th>Imported on</th></tr></thead>
-        <tbody></tbody>
-      </table>
+      <div id="files-table-wrap">
+        <table id="files-table">
+          <thead><tr><th>File</th><th>Period covered</th><th>Readings</th><th>Imported on</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
       <div class="danger-row"><button id="btn-clear" class="btn danger">Clear all data</button></div>
     </section>
   </div>

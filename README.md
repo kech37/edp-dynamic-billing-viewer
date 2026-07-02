@@ -37,7 +37,17 @@ This starts a local server and opens http://localhost:8123/app/ in your browser.
 - **Consumption vs market price** by hour — shows whether your usage is skewed to cheap
   or expensive hours (consumption-weighted POMIE vs flat average) and the cheapest
   3-hour window of the day
-- **Top consumption days** — your heaviest days with cost and deviation from average
+- **Load-shifting simulator** — pick an amount of kWh/day and two hours to see what
+  moving usage (dishwasher, washing machine, ...) would save per month/year, based on
+  the prices you actually paid at each hour
+- **Top consumption days** — your heaviest days with cost and deviation from average.
+  Tag unusual days (e.g. EV charging) manually or with "Auto-tag spike days"
+  (> 2.5× your median day); a toggle in the filter bar excludes tagged days from all
+  averages so they don't distort your habit metrics. Tags are kept in backups.
+- **Base load trend** — always-on power (W) per period, estimated from 02:00–06:00 usage
+- **Consumption vs temperature** — enter your city and daily mean temperatures are
+  fetched from the free Open-Meteo archive (needs internet, cached locally); shows a
+  scatter plot and the correlation, i.e. how much heating/cooling drives your usage
 - Weekday × hour heatmap of average consumption
 - **Compare periods** — pick any two periods and compare totals, average/day, cost,
   average price, and overlaid day profiles

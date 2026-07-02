@@ -6,7 +6,7 @@
 // ---------- IndexedDB ----------
 
 const DB_NAME = "edp-viewer";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -18,6 +18,12 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains("files")) {
         db.createObjectStore("files", { keyPath: "name" });
+      }
+      if (!db.objectStoreNames.contains("tags")) {
+        db.createObjectStore("tags", { keyPath: "date" });
+      }
+      if (!db.objectStoreNames.contains("weather")) {
+        db.createObjectStore("weather", { keyPath: "date" });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -50,11 +56,18 @@ async function dbGetAll(storeName) {
   });
 }
 
+async function dbDelete(storeName, key) {
+  const db = await openDB();
+  const tx = db.transaction(storeName, "readwrite");
+  tx.objectStore(storeName).delete(key);
+  return txPromise(tx);
+}
+
 async function dbClearAll() {
   const db = await openDB();
-  const tx = db.transaction(["readings", "files"], "readwrite");
-  tx.objectStore("readings").clear();
-  tx.objectStore("files").clear();
+  const stores = ["readings", "files", "tags", "weather"];
+  const tx = db.transaction(stores, "readwrite");
+  for (const s of stores) tx.objectStore(s).clear();
   return txPromise(tx);
 }
 
@@ -172,6 +185,11 @@ let fileMetas = [];
 let currentPeriod = "all"; // "all" or a period key (see periodKeyOf)
 let periodMode = "month"; // "month" (calendar) or "billing" (25th → 24th, matches EDP invoices)
 let cmpSel = { a: null, b: null }; // compare-view period selection
+let tagsMap = new Map(); // date -> tag record; tagged days can be excluded from all metrics
+let weatherMap = new Map(); // date -> mean temperature (°C)
+let excludeTagged = localStorage.getItem("excludeTagged") !== "0";
+let weatherAutoTried = false;
+let shiftTouched = false; // user changed the load-shift selects
 let charts = {};
 
 const fmtKwh = new Intl.NumberFormat("pt-PT", { maximumFractionDigits: 1 });
@@ -261,9 +279,18 @@ window.ingestFiles = ingestFiles; // also used by tests
 
 // ---------- Aggregation ----------
 
-function filteredReadings() {
+function isExcluded(r) {
+  return excludeTagged && tagsMap.has(r.date);
+}
+
+// Period filter only (tagged days kept) — used where tagged days must stay visible.
+function periodOnlyReadings() {
   if (currentPeriod === "all") return allReadings;
   return allReadings.filter((r) => periodKeyOf(r.date) === currentPeriod);
+}
+
+function filteredReadings() {
+  return periodOnlyReadings().filter((r) => !isExcluded(r));
 }
 
 function groupBy(records, keyFn) {
@@ -286,6 +313,8 @@ async function reload() {
   allReadings.sort((a, b) => (a.ts < b.ts ? -1 : 1));
   fileMetas = await dbGetAll("files");
   fileMetas.sort((a, b) => (a.from < b.from ? -1 : 1));
+  tagsMap = new Map((await dbGetAll("tags")).map((t) => [t.date, t]));
+  weatherMap = new Map((await dbGetAll("weather")).map((w) => [w.date, w.tmean]));
 
   const periods = [...new Set(allReadings.map((r) => periodKeyOf(r.date)))].sort();
   if (currentPeriod !== "all" && !periods.includes(currentPeriod)) currentPeriod = "all";
@@ -305,16 +334,35 @@ async function reload() {
     return;
   }
 
+  // Exclude-tagged-days toggle (only shown once days are tagged)
+  const excludeToggle = document.getElementById("exclude-toggle");
+  excludeToggle.hidden = tagsMap.size === 0;
+  document.getElementById("exclude-check").checked = excludeTagged;
+  document.getElementById("exclude-label").textContent =
+    `Exclude ${tagsMap.size} tagged day${tagsMap.size === 1 ? "" : "s"}`;
+
   renderPeriodChips(periods);
   renderKpis();
   renderMonthlyChart(periods);
   renderHourlyChart();
   renderDailyChart();
   renderPriceChart();
+  renderLoadShift();
   renderTopDays();
+  renderBaseTrend(periods);
+  renderWeather();
   renderHeatmap();
   renderCompare(periods);
   renderFilesTable();
+
+  // Auto-refresh weather once per session if a city was configured before
+  if (!weatherAutoTried && localStorage.getItem("weatherCity") && allReadings.length) {
+    weatherAutoTried = true;
+    const lastReading = allReadings[allReadings.length - 1].date;
+    const covered = [...weatherMap.keys()].sort();
+    const lastCovered = covered[covered.length - 1] || "";
+    if (lastCovered < lastReading) fetchWeather().catch(() => {});
+  }
 }
 
 function renderPeriodChips(periods) {
@@ -371,7 +419,7 @@ function renderKpis() {
   document.getElementById("kpi-price").textContent = totalKwh ? `${fmtEur4.format(totalCost / totalKwh)}/kWh` : "–";
   document.getElementById("kpi-pomie").textContent = `avg POMIE ${fmtKwh2.format(pomieAvg)} €/MWh`;
   document.getElementById("kpi-peak").textContent =
-    peakHour === null ? "–" : `${String(peakHour).padStart(2, "0")}:00–${String(peakHour + 1).padStart(2, "0")}:00`;
+    peakHour === null ? "–" : `${String(peakHour).padStart(2, "0")}h–${String(peakHour + 1).padStart(2, "0")}h`;
   document.getElementById("kpi-peak-sub").textContent =
     peakHour === null ? "–" : `${fmtKwh2.format(peakAvg)} kWh on an average day`;
   document.getElementById("kpi-base").textContent = `${Math.round(baseW)} W`;
@@ -562,27 +610,262 @@ function renderPriceChart() {
 }
 
 function renderTopDays() {
-  const recs = filteredReadings();
+  // Tagged days must stay visible (else they could never be un-tagged),
+  // so this table ignores the exclusion toggle. The reference average
+  // uses only non-excluded days, matching the rest of the dashboard.
+  const recs = periodOnlyReadings();
   const byDay = groupBy(recs, (r) => r.date);
   const days = [...byDay.entries()].map(([date, g]) => ({ date, kwh: g.kwh, cost: g.cost }));
-  const avg = days.length ? days.reduce((s, d) => s + d.kwh, 0) / days.length : 0;
+  const included = days.filter((d) => !(excludeTagged && tagsMap.has(d.date)));
+  const avg = included.length ? included.reduce((s, d) => s + d.kwh, 0) / included.length : 0;
   days.sort((a, b) => b.kwh - a.kwh);
-  const top = days.slice(0, 6);
+  const top = days.slice(0, 8);
   const maxKwh = top.length ? top[0].kwh : 0;
 
   const tbody = document.querySelector("#top-days tbody");
   tbody.innerHTML = "";
   for (const d of top) {
+    const tagged = tagsMap.has(d.date);
     const tr = document.createElement("tr");
+    if (tagged && excludeTagged) tr.className = "tagged";
     const pct = avg ? ((d.kwh / avg - 1) * 100) : 0;
     tr.innerHTML =
       `<td>${dateLabel(d.date)} <span class="hint">(${DOW_NAMES[dowIndex(d.date)]})</span></td>` +
       `<td class="num bar-cell"><div class="bar" style="width:${maxKwh ? (d.kwh / maxKwh) * 100 : 0}%"></div>` +
       `<span>${fmtKwh2.format(d.kwh)}</span></td>` +
       `<td class="num">${fmtEur.format(d.cost)}</td>` +
-      `<td class="num">+${fmtKwh.format(pct)}%</td>`;
+      `<td class="num">${pct >= 0 ? "+" : ""}${fmtKwh.format(pct)}%</td>`;
+    const td = document.createElement("td");
+    const btn = document.createElement("button");
+    btn.className = "btn mini";
+    btn.textContent = tagged ? "Untag" : "Tag";
+    btn.title = tagged ? "Remove tag (day counts in averages again)" : "Tag as unusual day (excluded from averages)";
+    btn.onclick = async () => {
+      if (tagged) await dbDelete("tags", d.date);
+      else await dbPutMany("tags", [{ date: d.date, taggedAt: new Date().toISOString() }]);
+      reload();
+    };
+    td.appendChild(btn);
+    tr.appendChild(td);
     tbody.appendChild(tr);
   }
+
+  const tagged = [...tagsMap.keys()];
+  const summary = document.getElementById("tag-summary-text");
+  if (tagged.length) {
+    let kwh = 0, cost = 0;
+    for (const r of allReadings) {
+      if (tagsMap.has(r.date)) { kwh += r.kwh; cost += r.cost || 0; }
+    }
+    summary.textContent = `${tagged.length} tagged day(s): ${fmtKwh.format(kwh)} kWh · ${fmtEur.format(cost)}`;
+  } else {
+    summary.textContent = "No tagged days yet.";
+  }
+}
+
+// Tag days that are clear outliers vs the typical (median) day.
+async function autoTagSpikes() {
+  const byDay = groupBy(allReadings, (r) => r.date);
+  const days = [...byDay.entries()].map(([date, g]) => ({ date, kwh: g.kwh }));
+  const sorted = days.map((d) => d.kwh).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)] || 0;
+  const threshold = Math.max(median * 2.5, 15);
+  const spikes = days.filter((d) => d.kwh > threshold && !tagsMap.has(d.date));
+  if (!spikes.length) {
+    toast(`No untagged days above ${fmtKwh.format(threshold)} kWh (2.5× your median day).`);
+    return;
+  }
+  await dbPutMany("tags", spikes.map((d) => ({ date: d.date, auto: true, taggedAt: new Date().toISOString() })));
+  await reload();
+  toast(`Tagged ${spikes.length} day(s) above ${fmtKwh.format(threshold)} kWh (2.5× your median day).`);
+}
+
+function renderLoadShift() {
+  const recs = filteredReadings();
+  const hours = [...Array(24).keys()];
+
+  // Effective price actually paid at each hour (€/kWh, losses included);
+  // falls back to the POMIE-based rate where there is no consumption.
+  const cost = Array(24).fill(0), kwh = Array(24).fill(0), pomieRate = Array(24).fill(0), n = Array(24).fill(0);
+  for (const r of recs) {
+    const h = Number(r.time.slice(0, 2));
+    kwh[h] += r.kwh;
+    cost[h] += r.cost || 0;
+    if (r.pomie !== null) { pomieRate[h] += ((1 + r.loss) * r.pomie) / 1000; n[h]++; }
+  }
+  const rate = hours.map((h) => (kwh[h] > 0.01 ? cost[h] / kwh[h] : n[h] ? pomieRate[h] / n[h] : 0));
+
+  const selFrom = document.getElementById("shift-from");
+  const selTo = document.getElementById("shift-to");
+  const fill = (sel) => {
+    const prev = sel.value;
+    sel.innerHTML = "";
+    for (const h of hours) {
+      const opt = document.createElement("option");
+      opt.value = h;
+      opt.textContent = `${String(h).padStart(2, "0")}h (${fmtEur4.format(rate[h])})`;
+      sel.appendChild(opt);
+    }
+    if (shiftTouched && prev !== "") sel.value = prev;
+  };
+  fill(selFrom);
+  fill(selTo);
+  if (!shiftTouched) {
+    selFrom.value = rate.indexOf(Math.max(...rate));
+    selTo.value = rate.indexOf(Math.min(...rate.filter((v) => v > 0)));
+  }
+
+  const update = () => {
+    const amount = parseFloat(document.getElementById("shift-kwh").value) || 0;
+    const from = Number(selFrom.value), to = Number(selTo.value);
+    const perDay = amount * (rate[from] - rate[to]);
+    const el = document.getElementById("shift-result");
+    const cls = perDay >= 0 ? "save" : "lose";
+    el.innerHTML = `<span class="${cls}">${perDay >= 0 ? "−" : "+"}${fmtEur.format(Math.abs(perDay * 30.44))}/month</span>`;
+    document.getElementById("shift-note").textContent =
+      perDay >= 0
+        ? `Saving ${fmtEur.format(perDay * 365)} per year — that hour costs you ` +
+          `${fmtEur4.format(rate[from])}/kWh vs ${fmtEur4.format(rate[to])}/kWh (prices you actually paid, losses included).`
+        : `That shift would cost you more: the target hour is more expensive in this period.`;
+  };
+  selFrom.onchange = () => { shiftTouched = true; update(); };
+  selTo.onchange = () => { shiftTouched = true; update(); };
+  document.getElementById("shift-kwh").oninput = update;
+  update();
+}
+
+function renderBaseTrend(periods) {
+  const baseW = periods.map((p) => {
+    const night = allReadings.filter((r) => {
+      if (periodKeyOf(r.date) !== p || isExcluded(r)) return false;
+      const h = Number(r.time.slice(0, 2));
+      return h >= 2 && h < 6;
+    });
+    if (!night.length) return 0;
+    return (night.reduce((s, r) => s + r.kwh, 0) / night.length) * 4 * 1000;
+  });
+
+  upsertChart("chart-baseload", {
+    type: "line",
+    data: {
+      labels: periods.map(periodLabelOf),
+      datasets: [{
+        label: "Base load (W)", data: baseW.map((v) => Math.round(v)),
+        borderColor: ACCENT, backgroundColor: "rgba(230,0,126,0.08)",
+        fill: true, tension: 0.3, pointRadius: 4,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { title: { display: true, text: "W" }, beginAtZero: true } },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+// ---------- Weather ----------
+
+function pearson(xs, ys) {
+  const n = xs.length;
+  if (n < 3) return 0;
+  const mx = xs.reduce((a, b) => a + b, 0) / n;
+  const my = ys.reduce((a, b) => a + b, 0) / n;
+  let cov = 0, sx = 0, sy = 0;
+  for (let i = 0; i < n; i++) {
+    cov += (xs[i] - mx) * (ys[i] - my);
+    sx += (xs[i] - mx) ** 2;
+    sy += (ys[i] - my) ** 2;
+  }
+  return sx && sy ? cov / Math.sqrt(sx * sy) : 0;
+}
+
+async function fetchWeather() {
+  const status = document.getElementById("weather-status");
+  const city = document.getElementById("weather-city").value.trim() || localStorage.getItem("weatherCity") || "";
+  if (!city || !allReadings.length) {
+    status.textContent = city ? "Upload reports first." : "Enter a city first.";
+    return;
+  }
+  try {
+    status.textContent = "Fetching…";
+    const geo = await (await fetch(
+      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=pt&format=json`
+    )).json();
+    if (!geo.results?.length) throw new Error(`city "${city}" not found`);
+    const { latitude, longitude, name } = geo.results[0];
+    const start = allReadings[0].date;
+    const end = allReadings[allReadings.length - 1].date;
+    const wx = await (await fetch(
+      `https://archive-api.open-meteo.com/v1/archive?latitude=${latitude}&longitude=${longitude}` +
+      `&start_date=${start}&end_date=${end}&daily=temperature_2m_mean&timezone=auto`
+    )).json();
+    if (!wx.daily?.time) throw new Error("no weather data returned");
+    const records = wx.daily.time
+      .map((d, i) => ({ date: d, tmean: wx.daily.temperature_2m_mean[i] }))
+      .filter((r) => r.tmean !== null && r.tmean !== undefined);
+    await dbPutMany("weather", records);
+    localStorage.setItem("weatherCity", name);
+    weatherMap = new Map(records.map((w) => [w.date, w.tmean]));
+    renderWeather();
+  } catch (err) {
+    console.error(err);
+    status.textContent = `Weather fetch failed: ${err.message}`;
+  }
+}
+
+function renderWeather() {
+  const cityInput = document.getElementById("weather-city");
+  if (!cityInput.value) cityInput.value = localStorage.getItem("weatherCity") || "";
+
+  const recs = filteredReadings();
+  const byDay = groupBy(recs, (r) => r.date);
+  const points = [];
+  for (const [date, g] of byDay) {
+    const t = weatherMap.get(date);
+    if (t !== undefined) points.push({ x: t, y: g.kwh, date });
+  }
+
+  const status = document.getElementById("weather-status");
+  const insight = document.getElementById("weather-insight");
+  if (!points.length) {
+    status.textContent = weatherMap.size ? "No overlap between weather and selected period." : "";
+    insight.textContent = "Load historical temperatures (Open-Meteo, free) to see how weather drives your consumption.";
+    upsertChart("chart-weather", { type: "scatter", data: { datasets: [] }, options: { responsive: true, maintainAspectRatio: false } });
+    return;
+  }
+
+  status.textContent = `${localStorage.getItem("weatherCity")} · ${points.length}/${byDay.size} days matched`;
+  const r = pearson(points.map((p) => p.x), points.map((p) => p.y));
+  const strength = Math.abs(r) > 0.5 ? "strong" : Math.abs(r) > 0.3 ? "moderate" : "weak";
+  const direction = r < 0 ? "colder days push your consumption up (heating)" : "warmer days push your consumption up (cooling)";
+  insight.innerHTML = Math.abs(r) < 0.15
+    ? `Correlation <strong>r = ${fmtKwh2.format(r)}</strong> — your consumption barely depends on outside temperature.`
+    : `Correlation <strong>r = ${fmtKwh2.format(r)}</strong> — a ${strength} relationship: ${direction}.`;
+
+  upsertChart("chart-weather", {
+    type: "scatter",
+    data: {
+      datasets: [{
+        label: "day", data: points,
+        backgroundColor: "rgba(230,0,126,0.55)", pointRadius: 4,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { title: { display: true, text: "Mean temperature (°C)" } },
+        y: { title: { display: true, text: "kWh / day" }, beginAtZero: true },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (item) => `${dateLabel(item.raw.date)}: ${fmtKwh2.format(item.raw.y)} kWh at ${fmtKwh.format(item.raw.x)} °C`,
+          },
+        },
+      },
+    },
+  });
 }
 
 function renderCompare(periods) {
@@ -607,7 +890,7 @@ function renderCompare(periods) {
   }
 
   const side = (p) => {
-    const recs = allReadings.filter((r) => periodKeyOf(r.date) === p);
+    const recs = allReadings.filter((r) => periodKeyOf(r.date) === p && !isExcluded(r));
     const kwh = recs.reduce((s, r) => s + r.kwh, 0);
     const cost = recs.reduce((s, r) => s + (r.cost || 0), 0);
     const days = new Set(recs.map((r) => r.date)).size;
@@ -724,7 +1007,13 @@ function renderFilesTable() {
 // ---------- Backup ----------
 
 function exportBackup() {
-  const payload = { version: 1, exportedAt: new Date().toISOString(), files: fileMetas, readings: allReadings };
+  const payload = {
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    files: fileMetas,
+    readings: allReadings,
+    tags: [...tagsMap.values()],
+  };
   const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -739,6 +1028,7 @@ async function importBackup(file) {
     if (!Array.isArray(payload.readings)) throw new Error("Invalid backup file");
     await dbPutMany("readings", payload.readings);
     if (Array.isArray(payload.files)) await dbPutMany("files", payload.files);
+    if (Array.isArray(payload.tags)) await dbPutMany("tags", payload.tags);
     await reload();
     toast(`Backup restored — ${fmtKwh.format(payload.readings.length)} readings merged.`);
   } catch (err) {
@@ -769,6 +1059,14 @@ function setupEvents() {
     toast("All data cleared.");
   };
 
+  document.getElementById("exclude-check").onchange = (e) => {
+    excludeTagged = e.target.checked;
+    localStorage.setItem("excludeTagged", excludeTagged ? "1" : "0");
+    reload();
+  };
+  document.getElementById("btn-autotag").onclick = autoTagSpikes;
+  document.getElementById("btn-weather").onclick = fetchWeather;
+
   // Calendar months vs billing periods (25th → 24th)
   document.querySelectorAll("#period-mode button").forEach((btn) => {
     btn.onclick = () => {
@@ -797,6 +1095,7 @@ function setupEvents() {
 
 Chart.defaults.font.family = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 Chart.defaults.color = "#6b7385";
+Chart.defaults.locale = "pt-PT";
 
 setupEvents();
 reload();
