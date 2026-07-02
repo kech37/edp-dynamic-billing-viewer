@@ -169,7 +169,9 @@ function parseWorkbook(arrayBuffer, fileName) {
 
 let allReadings = [];
 let fileMetas = [];
-let currentMonth = "all"; // "all" or "YYYY-MM"
+let currentPeriod = "all"; // "all" or a period key (see periodKeyOf)
+let periodMode = "month"; // "month" (calendar) or "billing" (25th → 24th, matches EDP invoices)
+let cmpSel = { a: null, b: null }; // compare-view period selection
 let charts = {};
 
 const fmtKwh = new Intl.NumberFormat("pt-PT", { maximumFractionDigits: 1 });
@@ -183,6 +185,23 @@ const DOW_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 function monthLabel(ym) {
   const [y, m] = ym.split("-").map(Number);
   return `${MONTH_NAMES[m - 1]} ${y}`;
+}
+
+// Period key for a date: "YYYY-MM" in month mode, or the ISO date of the
+// billing-period start (the 25th) in billing mode.
+function periodKeyOf(date) {
+  if (periodMode === "month") return date.slice(0, 7);
+  let [y, m, d] = date.split("-").map(Number);
+  if (d < 25) { m -= 1; if (m === 0) { m = 12; y -= 1; } }
+  return `${y}-${String(m).padStart(2, "0")}-25`;
+}
+
+function periodLabelOf(key) {
+  if (periodMode === "month") return monthLabel(key);
+  const [y, m] = key.split("-").map(Number);
+  let ey = y, em = m + 1;
+  if (em === 13) { em = 1; ey += 1; }
+  return `25 ${MONTH_NAMES[m - 1]} – 24 ${MONTH_NAMES[em - 1]} ${ey}`;
 }
 
 function dateLabel(iso) {
@@ -243,8 +262,8 @@ window.ingestFiles = ingestFiles; // also used by tests
 // ---------- Aggregation ----------
 
 function filteredReadings() {
-  if (currentMonth === "all") return allReadings;
-  return allReadings.filter((r) => r.date.startsWith(currentMonth));
+  if (currentPeriod === "all") return allReadings;
+  return allReadings.filter((r) => periodKeyOf(r.date) === currentPeriod);
 }
 
 function groupBy(records, keyFn) {
@@ -268,8 +287,8 @@ async function reload() {
   fileMetas = await dbGetAll("files");
   fileMetas.sort((a, b) => (a.from < b.from ? -1 : 1));
 
-  const months = [...new Set(allReadings.map((r) => r.date.slice(0, 7)))].sort();
-  if (currentMonth !== "all" && !months.includes(currentMonth)) currentMonth = "all";
+  const periods = [...new Set(allReadings.map((r) => periodKeyOf(r.date)))].sort();
+  if (currentPeriod !== "all" && !periods.includes(currentPeriod)) currentPeriod = "all";
 
   const hasData = allReadings.length > 0;
   document.getElementById("empty-state").hidden = hasData;
@@ -286,27 +305,30 @@ async function reload() {
     return;
   }
 
-  renderMonthChips(months);
+  renderPeriodChips(periods);
   renderKpis();
-  renderMonthlyChart(months);
+  renderMonthlyChart(periods);
   renderHourlyChart();
   renderDailyChart();
+  renderPriceChart();
+  renderTopDays();
   renderHeatmap();
+  renderCompare(periods);
   renderFilesTable();
 }
 
-function renderMonthChips(months) {
+function renderPeriodChips(periods) {
   const wrap = document.getElementById("month-filter");
   wrap.innerHTML = "";
   const mk = (value, label) => {
     const b = document.createElement("button");
-    b.className = "chip" + (currentMonth === value ? " active" : "");
+    b.className = "chip" + (currentPeriod === value ? " active" : "");
     b.textContent = label;
-    b.onclick = () => { currentMonth = value; reload(); };
+    b.onclick = () => { currentPeriod = value; reload(); };
     wrap.appendChild(b);
   };
   mk("all", "All history");
-  months.forEach((m) => mk(m, monthLabel(m)));
+  periods.forEach((p) => mk(p, periodLabelOf(p)));
 }
 
 function renderKpis() {
@@ -332,6 +354,14 @@ function renderKpis() {
 
   const pomieAvg = recs.length ? recs.reduce((s, r) => s + (r.pomie || 0), 0) / recs.length : 0;
 
+  // Base load: average power drawn during deep night (02:00–05:59), when
+  // most usage is always-on appliances (fridge, router, standby, ...).
+  const night = recs.filter((r) => { const h = Number(r.time.slice(0, 2)); return h >= 2 && h < 6; });
+  const baseKwhPerQuarter = night.length ? night.reduce((s, r) => s + r.kwh, 0) / night.length : 0;
+  const baseW = baseKwhPerQuarter * 4 * 1000;
+  const baseDailyKwh = (baseW * 24) / 1000;
+  const basePct = totalKwh && days ? ((baseDailyKwh * days) / totalKwh) * 100 : 0;
+
   document.getElementById("kpi-total").textContent = `${fmtKwh.format(totalKwh)} kWh`;
   document.getElementById("kpi-days").textContent = `${days} days of data`;
   document.getElementById("kpi-avg-day").textContent = `${fmtKwh2.format(days ? totalKwh / days : 0)} kWh`;
@@ -344,6 +374,9 @@ function renderKpis() {
     peakHour === null ? "–" : `${String(peakHour).padStart(2, "0")}:00–${String(peakHour + 1).padStart(2, "0")}:00`;
   document.getElementById("kpi-peak-sub").textContent =
     peakHour === null ? "–" : `${fmtKwh2.format(peakAvg)} kWh on an average day`;
+  document.getElementById("kpi-base").textContent = `${Math.round(baseW)} W`;
+  document.getElementById("kpi-base-sub").textContent =
+    `≈ ${fmtKwh2.format(baseDailyKwh)} kWh/day · ${fmtKwh.format(basePct)}% of usage`;
 }
 
 function upsertChart(id, config) {
@@ -354,18 +387,18 @@ function upsertChart(id, config) {
 const ACCENT = "#e6007e";
 const BLUE = "#2f6fed";
 
-function renderMonthlyChart(months) {
-  const byMonth = groupBy(allReadings, (r) => r.date.slice(0, 7));
-  const kwh = months.map((m) => byMonth.get(m)?.kwh ?? 0);
-  const cost = months.map((m) => byMonth.get(m)?.cost ?? 0);
+function renderMonthlyChart(periods) {
+  const byPeriod = groupBy(allReadings, (r) => periodKeyOf(r.date));
+  const kwh = periods.map((p) => byPeriod.get(p)?.kwh ?? 0);
+  const cost = periods.map((p) => byPeriod.get(p)?.cost ?? 0);
 
   upsertChart("chart-monthly", {
     data: {
-      labels: months.map(monthLabel),
+      labels: periods.map(periodLabelOf),
       datasets: [
         {
           type: "bar", label: "kWh", data: kwh, yAxisID: "y",
-          backgroundColor: months.map((m) => (currentMonth === m ? ACCENT : "#f3a8ce")),
+          backgroundColor: periods.map((p) => (currentPeriod === p ? ACCENT : "#f3a8ce")),
           borderRadius: 6,
         },
         {
@@ -378,8 +411,8 @@ function renderMonthlyChart(months) {
       responsive: true, maintainAspectRatio: false,
       onClick: (evt, elements) => {
         if (!elements.length) return;
-        const m = months[elements[0].index];
-        currentMonth = currentMonth === m ? "all" : m;
+        const p = periods[elements[0].index];
+        currentPeriod = currentPeriod === p ? "all" : p;
         reload();
       },
       scales: {
@@ -428,10 +461,10 @@ function renderDailyChart() {
   const byDay = groupBy(recs, (r) => r.date);
   const days = [...byDay.keys()].sort();
   const kwh = days.map((d) => byDay.get(d).kwh);
-  const isMonth = currentMonth !== "all";
+  const isMonth = currentPeriod !== "all";
 
   document.getElementById("daily-title").textContent =
-    isMonth ? `Daily consumption — ${monthLabel(currentMonth)}` : "Daily consumption — all history";
+    isMonth ? `Daily consumption — ${periodLabelOf(currentPeriod)}` : "Daily consumption — all history";
 
   upsertChart("chart-daily", {
     type: isMonth ? "bar" : "line",
@@ -453,6 +486,170 @@ function renderDailyChart() {
         legend: { display: false },
         tooltip: { callbacks: { title: (items) => (isMonth ? dateLabel(days[items[0].dataIndex]) : items[0].label) } },
       },
+    },
+  });
+}
+
+function renderPriceChart() {
+  const recs = filteredReadings();
+  const hours = [...Array(24).keys()];
+
+  const kwhByHour = Array(24).fill(0);
+  const pomieSum = Array(24).fill(0);
+  const pomieCount = Array(24).fill(0);
+  const datesByHour = Array.from({ length: 24 }, () => new Set());
+  let wSum = 0, wKwh = 0, simpleSum = 0, simpleCount = 0;
+  for (const r of recs) {
+    const h = Number(r.time.slice(0, 2));
+    kwhByHour[h] += r.kwh;
+    datesByHour[h].add(r.date);
+    if (r.pomie !== null) {
+      pomieSum[h] += r.pomie;
+      pomieCount[h]++;
+      wSum += r.kwh * r.pomie;
+      wKwh += r.kwh;
+      simpleSum += r.pomie;
+      simpleCount++;
+    }
+  }
+  const avgKwh = hours.map((h) => (datesByHour[h].size ? kwhByHour[h] / datesByHour[h].size : 0));
+  const avgPomie = hours.map((h) => (pomieCount[h] ? pomieSum[h] / pomieCount[h] : 0));
+
+  // Consumption-weighted price vs flat average → is usage skewed to pricey hours?
+  const weighted = wKwh ? wSum / wKwh : 0;
+  const flat = simpleCount ? simpleSum / simpleCount : 0;
+  const diffPct = flat ? (weighted / flat - 1) * 100 : 0;
+
+  // Cheapest 3-hour window of the average day
+  let bestStart = 0, bestPrice = Infinity;
+  for (let h = 0; h <= 21; h++) {
+    const p = (avgPomie[h] + avgPomie[h + 1] + avgPomie[h + 2]) / 3;
+    if (p < bestPrice) { bestPrice = p; bestStart = h; }
+  }
+
+  const el = document.getElementById("price-insight");
+  el.innerHTML =
+    `Your usage is skewed to <strong>${diffPct >= 0 ? "pricier" : "cheaper"}</strong> hours: ` +
+    `weighted price <strong>${fmtKwh2.format(weighted)} €/MWh</strong> vs ${fmtKwh2.format(flat)} €/MWh flat average ` +
+    `(<strong>${diffPct >= 0 ? "+" : ""}${fmtKwh.format(diffPct)}%</strong>). ` +
+    `Cheapest window: <strong>${String(bestStart).padStart(2, "0")}h–${String(bestStart + 3).padStart(2, "0")}h</strong> ` +
+    `(${fmtKwh2.format(bestPrice)} €/MWh).`;
+
+  upsertChart("chart-price", {
+    data: {
+      labels: hours.map((h) => `${String(h).padStart(2, "0")}h`),
+      datasets: [
+        {
+          type: "bar", label: "Your consumption (kWh/h)", data: avgKwh, yAxisID: "y",
+          backgroundColor: "rgba(230,0,126,0.35)", borderRadius: 3,
+        },
+        {
+          type: "line", label: "POMIE (€/MWh)", data: avgPomie, yAxisID: "y1",
+          borderColor: BLUE, backgroundColor: BLUE, tension: 0.35, pointRadius: 0, borderWidth: 2,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        y: { title: { display: true, text: "kWh / hour" }, beginAtZero: true },
+        y1: { position: "right", grid: { drawOnChartArea: false }, title: { display: true, text: "€/MWh" }, beginAtZero: true },
+      },
+      plugins: { legend: { position: "bottom" } },
+      interaction: { mode: "index", intersect: false },
+    },
+  });
+}
+
+function renderTopDays() {
+  const recs = filteredReadings();
+  const byDay = groupBy(recs, (r) => r.date);
+  const days = [...byDay.entries()].map(([date, g]) => ({ date, kwh: g.kwh, cost: g.cost }));
+  const avg = days.length ? days.reduce((s, d) => s + d.kwh, 0) / days.length : 0;
+  days.sort((a, b) => b.kwh - a.kwh);
+  const top = days.slice(0, 6);
+  const maxKwh = top.length ? top[0].kwh : 0;
+
+  const tbody = document.querySelector("#top-days tbody");
+  tbody.innerHTML = "";
+  for (const d of top) {
+    const tr = document.createElement("tr");
+    const pct = avg ? ((d.kwh / avg - 1) * 100) : 0;
+    tr.innerHTML =
+      `<td>${dateLabel(d.date)} <span class="hint">(${DOW_NAMES[dowIndex(d.date)]})</span></td>` +
+      `<td class="num bar-cell"><div class="bar" style="width:${maxKwh ? (d.kwh / maxKwh) * 100 : 0}%"></div>` +
+      `<span>${fmtKwh2.format(d.kwh)}</span></td>` +
+      `<td class="num">${fmtEur.format(d.cost)}</td>` +
+      `<td class="num">+${fmtKwh.format(pct)}%</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+function renderCompare(periods) {
+  const card = document.getElementById("compare-card");
+  if (periods.length < 2) { card.hidden = true; return; }
+  card.hidden = false;
+
+  if (!periods.includes(cmpSel.a)) cmpSel.a = periods[periods.length - 2];
+  if (!periods.includes(cmpSel.b)) cmpSel.b = periods[periods.length - 1];
+
+  for (const [id, key] of [["cmp-a", "a"], ["cmp-b", "b"]]) {
+    const sel = document.getElementById(id);
+    sel.innerHTML = "";
+    for (const p of periods) {
+      const opt = document.createElement("option");
+      opt.value = p;
+      opt.textContent = periodLabelOf(p);
+      sel.appendChild(opt);
+    }
+    sel.value = cmpSel[key];
+    sel.onchange = () => { cmpSel[key] = sel.value; renderCompare(periods); };
+  }
+
+  const side = (p) => {
+    const recs = allReadings.filter((r) => periodKeyOf(r.date) === p);
+    const kwh = recs.reduce((s, r) => s + r.kwh, 0);
+    const cost = recs.reduce((s, r) => s + (r.cost || 0), 0);
+    const days = new Set(recs.map((r) => r.date)).size;
+    return { recs, kwh, cost, days, perDay: days ? kwh / days : 0, price: kwh ? cost / kwh : 0 };
+  };
+  const A = side(cmpSel.a), B = side(cmpSel.b);
+
+  const stat = (label, va, vb, fmt) => {
+    const pct = va ? (vb / va - 1) * 100 : 0;
+    const cls = pct >= 0 ? "delta-up" : "delta-down";
+    return `<div class="cmp-stat">${label}<b>${fmt(va)} → ${fmt(vb)} ` +
+      `<span class="${cls}">(${pct >= 0 ? "+" : ""}${fmtKwh.format(pct)}%)</span></b></div>`;
+  };
+  document.getElementById("cmp-stats").innerHTML =
+    stat("Total", A.kwh, B.kwh, (v) => `${fmtKwh.format(v)} kWh`) +
+    stat("Average per day", A.perDay, B.perDay, (v) => `${fmtKwh2.format(v)} kWh`) +
+    stat("Estimated cost", A.cost, B.cost, (v) => fmtEur.format(v)) +
+    stat("Average price", A.price, B.price, (v) => fmtEur4.format(v));
+
+  const hours = [...Array(24).keys()];
+  const profile = (recs) => {
+    const byHour = groupBy(recs, (r) => Number(r.time.slice(0, 2)));
+    return hours.map((h) => {
+      const g = byHour.get(h);
+      return g ? g.kwh / g.dates.size : 0;
+    });
+  };
+
+  upsertChart("chart-compare", {
+    type: "line",
+    data: {
+      labels: hours.map((h) => `${String(h).padStart(2, "0")}h`),
+      datasets: [
+        { label: periodLabelOf(cmpSel.a), data: profile(A.recs), borderColor: BLUE, backgroundColor: "rgba(47,111,237,0.08)", fill: true, tension: 0.35, pointRadius: 0 },
+        { label: periodLabelOf(cmpSel.b), data: profile(B.recs), borderColor: ACCENT, backgroundColor: "rgba(230,0,126,0.08)", fill: true, tension: 0.35, pointRadius: 0 },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { title: { display: true, text: "kWh / hour (average day)" }, beginAtZero: true } },
+      plugins: { legend: { position: "bottom" } },
+      interaction: { mode: "index", intersect: false },
     },
   });
 }
@@ -567,10 +764,22 @@ function setupEvents() {
   document.getElementById("btn-clear").onclick = async () => {
     if (!confirm("Delete ALL stored readings and history? Consider exporting a backup first.")) return;
     await dbClearAll();
-    currentMonth = "all";
+    currentPeriod = "all";
     await reload();
     toast("All data cleared.");
   };
+
+  // Calendar months vs billing periods (25th → 24th)
+  document.querySelectorAll("#period-mode button").forEach((btn) => {
+    btn.onclick = () => {
+      if (periodMode === btn.dataset.mode) return;
+      periodMode = btn.dataset.mode;
+      currentPeriod = "all";
+      cmpSel = { a: null, b: null };
+      document.querySelectorAll("#period-mode button").forEach((b) => b.classList.toggle("active", b === btn));
+      reload();
+    };
+  });
 
   // Drag & drop anywhere on the page
   const overlay = document.getElementById("drop-overlay");

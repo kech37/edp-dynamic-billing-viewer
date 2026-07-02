@@ -34,7 +34,13 @@
   </div>
 
   <div id="dashboard" hidden>
-    <div id="month-filter" class="chips"></div>
+    <div class="filter-row">
+      <div id="month-filter" class="chips"></div>
+      <div class="segmented" id="period-mode" title="Group by calendar month or by EDP billing period (25th → 24th)">
+        <button data-mode="month" class="active">Calendar months</button>
+        <button data-mode="billing">Billing periods (25→24)</button>
+      </div>
+    </div>
 
     <section class="kpis">
       <div class="card kpi"><div class="kpi-label">Total consumption</div><div class="kpi-value" id="kpi-total">–</div><div class="kpi-sub" id="kpi-days">–</div></div>
@@ -42,11 +48,12 @@
       <div class="card kpi"><div class="kpi-label">Estimated energy cost</div><div class="kpi-value" id="kpi-cost">–</div><div class="kpi-sub">OMIE × (1 + losses), excl. grid tariffs &amp; fees</div></div>
       <div class="card kpi"><div class="kpi-label">Average price paid</div><div class="kpi-value" id="kpi-price">–</div><div class="kpi-sub" id="kpi-pomie">–</div></div>
       <div class="card kpi"><div class="kpi-label">Peak hour</div><div class="kpi-value" id="kpi-peak">–</div><div class="kpi-sub" id="kpi-peak-sub">–</div></div>
+      <div class="card kpi"><div class="kpi-label">Base load (always-on)</div><div class="kpi-value" id="kpi-base">–</div><div class="kpi-sub" id="kpi-base-sub">–</div></div>
     </section>
 
     <section class="grid-2">
       <div class="card">
-        <h2>Monthly consumption &amp; cost <span class="hint">(click a bar to filter)</span></h2>
+        <h2>Consumption &amp; cost per period <span class="hint">(click a bar to filter)</span></h2>
         <div class="chart-wrap"><canvas id="chart-monthly"></canvas></div>
       </div>
       <div class="card">
@@ -60,9 +67,35 @@
       <div class="chart-wrap tall"><canvas id="chart-daily"></canvas></div>
     </section>
 
+    <section class="grid-2">
+      <div class="card">
+        <h2>Consumption vs market price <span class="hint">(by hour of day)</span></h2>
+        <p id="price-insight" class="insight"></p>
+        <div class="chart-wrap"><canvas id="chart-price"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>Top consumption days</h2>
+        <table id="top-days" class="data-table">
+          <thead><tr><th>Date</th><th>kWh</th><th>Est. cost</th><th>vs daily average</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="card">
       <h2>When do I use energy? <span class="hint">(average kWh by weekday × hour)</span></h2>
       <div id="heatmap"></div>
+    </section>
+
+    <section class="card" id="compare-card">
+      <h2>Compare periods</h2>
+      <div class="compare-controls">
+        <select id="cmp-a"></select>
+        <span class="vs">vs</span>
+        <select id="cmp-b"></select>
+      </div>
+      <div id="cmp-stats" class="cmp-stats"></div>
+      <div class="chart-wrap"><canvas id="chart-compare"></canvas></div>
     </section>
 
     <section class="card">
