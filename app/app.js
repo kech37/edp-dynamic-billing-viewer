@@ -189,7 +189,6 @@ let tagsMap = new Map(); // date -> tag record; tagged days can be excluded from
 let weatherMap = new Map(); // date -> mean temperature (°C)
 let excludeTagged = localStorage.getItem("excludeTagged") !== "0";
 let weatherAutoTried = false;
-let shiftTouched = false; // user changed the load-shift selects
 let charts = {};
 
 const fmtKwh = new Intl.NumberFormat("pt-PT", { maximumFractionDigits: 1 });
@@ -347,7 +346,6 @@ async function reload() {
   renderHourlyChart();
   renderDailyChart();
   renderPriceChart();
-  renderLoadShift();
   renderTopDays();
   renderBaseTrend(periods);
   renderWeather();
@@ -416,7 +414,8 @@ function renderKpis() {
   document.getElementById("kpi-avg-night").textContent =
     `${fmtKwh.format(totalKwh ? (dayKwh / totalKwh) * 100 : 0)}% between 08:00–22:00`;
   document.getElementById("kpi-cost").textContent = fmtEur.format(totalCost);
-  document.getElementById("kpi-price").textContent = totalKwh ? `${fmtEur4.format(totalCost / totalKwh)}/kWh` : "–";
+  document.getElementById("kpi-price").innerHTML =
+    totalKwh ? `${fmtEur4.format(totalCost / totalKwh)}<span class="unit">/kWh</span>` : "–";
   document.getElementById("kpi-pomie").textContent = `avg POMIE ${fmtKwh2.format(pomieAvg)} €/MWh`;
   document.getElementById("kpi-peak").textContent =
     peakHour === null ? "–" : `${String(peakHour).padStart(2, "0")}h–${String(peakHour + 1).padStart(2, "0")}h`;
@@ -678,60 +677,6 @@ async function autoTagSpikes() {
   await dbPutMany("tags", spikes.map((d) => ({ date: d.date, auto: true, taggedAt: new Date().toISOString() })));
   await reload();
   toast(`Tagged ${spikes.length} day(s) above ${fmtKwh.format(threshold)} kWh (2.5× your median day).`);
-}
-
-function renderLoadShift() {
-  const recs = filteredReadings();
-  const hours = [...Array(24).keys()];
-
-  // Effective price actually paid at each hour (€/kWh, losses included);
-  // falls back to the POMIE-based rate where there is no consumption.
-  const cost = Array(24).fill(0), kwh = Array(24).fill(0), pomieRate = Array(24).fill(0), n = Array(24).fill(0);
-  for (const r of recs) {
-    const h = Number(r.time.slice(0, 2));
-    kwh[h] += r.kwh;
-    cost[h] += r.cost || 0;
-    if (r.pomie !== null) { pomieRate[h] += ((1 + r.loss) * r.pomie) / 1000; n[h]++; }
-  }
-  const rate = hours.map((h) => (kwh[h] > 0.01 ? cost[h] / kwh[h] : n[h] ? pomieRate[h] / n[h] : 0));
-
-  const selFrom = document.getElementById("shift-from");
-  const selTo = document.getElementById("shift-to");
-  const fill = (sel) => {
-    const prev = sel.value;
-    sel.innerHTML = "";
-    for (const h of hours) {
-      const opt = document.createElement("option");
-      opt.value = h;
-      opt.textContent = `${String(h).padStart(2, "0")}h (${fmtEur4.format(rate[h])})`;
-      sel.appendChild(opt);
-    }
-    if (shiftTouched && prev !== "") sel.value = prev;
-  };
-  fill(selFrom);
-  fill(selTo);
-  if (!shiftTouched) {
-    selFrom.value = rate.indexOf(Math.max(...rate));
-    selTo.value = rate.indexOf(Math.min(...rate.filter((v) => v > 0)));
-  }
-
-  const update = () => {
-    const amount = parseFloat(document.getElementById("shift-kwh").value) || 0;
-    const from = Number(selFrom.value), to = Number(selTo.value);
-    const perDay = amount * (rate[from] - rate[to]);
-    const el = document.getElementById("shift-result");
-    const cls = perDay >= 0 ? "save" : "lose";
-    el.innerHTML = `<span class="${cls}">${perDay >= 0 ? "−" : "+"}${fmtEur.format(Math.abs(perDay * 30.44))}/month</span>`;
-    document.getElementById("shift-note").textContent =
-      perDay >= 0
-        ? `Saving ${fmtEur.format(perDay * 365)} per year — that hour costs you ` +
-          `${fmtEur4.format(rate[from])}/kWh vs ${fmtEur4.format(rate[to])}/kWh (prices you actually paid, losses included).`
-        : `That shift would cost you more: the target hour is more expensive in this period.`;
-  };
-  selFrom.onchange = () => { shiftTouched = true; update(); };
-  selTo.onchange = () => { shiftTouched = true; update(); };
-  document.getElementById("shift-kwh").oninput = update;
-  update();
 }
 
 function renderBaseTrend(periods) {

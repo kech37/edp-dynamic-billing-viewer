@@ -37,9 +37,6 @@ This starts a local server and opens http://localhost:8123/app/ in your browser.
 - **Consumption vs market price** by hour — shows whether your usage is skewed to cheap
   or expensive hours (consumption-weighted POMIE vs flat average) and the cheapest
   3-hour window of the day
-- **Load-shifting simulator** — pick an amount of kWh/day and two hours to see what
-  moving usage (dishwasher, washing machine, ...) would save per month/year, based on
-  the prices you actually paid at each hour
 - **Top consumption days** — your heaviest days with cost and deviation from average.
   Tag unusual days (e.g. EV charging) manually or with "Auto-tag spike days"
   (> 2.5× your median day); a toggle in the filter bar excludes tagged days from all

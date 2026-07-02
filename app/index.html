@@ -80,21 +80,6 @@
         <div class="chart-wrap"><canvas id="chart-price"></canvas></div>
       </div>
       <div class="card">
-        <h2>Load-shifting simulator <span class="hint">(what if I ran appliances at cheaper hours?)</span></h2>
-        <div class="shift-controls">
-          <span>Moving</span>
-          <input id="shift-kwh" type="number" value="1" min="0.1" step="0.1"> <span>kWh/day from</span>
-          <select id="shift-from"></select>
-          <span>to</span>
-          <select id="shift-to"></select>
-        </div>
-        <div id="shift-result" class="shift-result"></div>
-        <p id="shift-note" class="insight"></p>
-      </div>
-    </section>
-
-    <section class="grid-2">
-      <div class="card">
         <h2>Top consumption days <span class="hint">(tag unusual days — e.g. EV charging — to exclude them from averages)</span></h2>
         <table id="top-days" class="data-table">
           <thead><tr><th>Date</th><th>kWh</th><th>Est. cost</th><th>vs average</th><th></th></tr></thead>
@@ -105,21 +90,23 @@
           <button id="btn-autotag" class="btn mini">Auto-tag spike days</button>
         </div>
       </div>
+    </section>
+
+    <section class="grid-2">
       <div class="card">
         <h2>Base load trend <span class="hint">(always-on power per period)</span></h2>
         <div class="chart-wrap"><canvas id="chart-baseload"></canvas></div>
       </div>
-    </section>
-
-    <section class="card">
-      <h2>Consumption vs temperature <span class="hint">(daily totals, tagged days excluded)</span></h2>
-      <div class="weather-controls">
-        <input id="weather-city" type="text" placeholder="City (e.g. Porto)">
-        <button id="btn-weather" class="btn">Load weather data</button>
-        <span id="weather-status" class="hint"></span>
+      <div class="card">
+        <h2>Consumption vs temperature <span class="hint">(daily totals, tagged days excluded)</span></h2>
+        <div class="weather-controls">
+          <input id="weather-city" type="text" placeholder="City (e.g. Porto)">
+          <button id="btn-weather" class="btn">Load weather data</button>
+          <span id="weather-status" class="hint"></span>
+        </div>
+        <p id="weather-insight" class="insight"></p>
+        <div class="chart-wrap"><canvas id="chart-weather"></canvas></div>
       </div>
-      <p id="weather-insight" class="insight"></p>
-      <div class="chart-wrap"><canvas id="chart-weather"></canvas></div>
     </section>
 
     <section class="card">
