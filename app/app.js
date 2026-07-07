@@ -1,17 +1,19 @@
-/* Energy Consumption Viewer — parses EDP XLSX reports (POMIE_* sheet),
-   stores 15-min readings in IndexedDB and renders a dashboard. */
+/* EDP Dynamic Electricity — OMIE Billing Calculator & Viewer.
+   Parses EDP XLSX reports (POMIE_* readings sheet + ELE_DINAMICA billing sheet),
+   stores 15-min readings in IndexedDB, reconstructs the pre-tax invoice with
+   EDP's indexed-price formula, and renders a dashboard. */
 
 "use strict";
 
 // ---------- IndexedDB ----------
 
 const DB_NAME = "edp-viewer";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (e) => {
       const db = req.result;
       if (!db.objectStoreNames.contains("readings")) {
         db.createObjectStore("readings", { keyPath: "ts" });
@@ -24,6 +26,16 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains("weather")) {
         db.createObjectStore("weather", { keyPath: "date" });
+      }
+      if (!db.objectStoreNames.contains("billing")) {
+        db.createObjectStore("billing", { keyPath: "start" });
+      }
+      // v3 switched reading costs from the bare OMIE component to the full
+      // invoice formula; readings stored by older versions carry stale costs,
+      // so drop them and let the user re-import the XLSX reports.
+      if (e.oldVersion > 0 && e.oldVersion < 3) {
+        req.transaction.objectStore("readings").clear();
+        req.transaction.objectStore("files").clear();
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -65,7 +77,7 @@ async function dbDelete(storeName, key) {
 
 async function dbClearAll() {
   const db = await openDB();
-  const stores = ["readings", "files", "tags", "weather"];
+  const stores = ["readings", "files", "tags", "weather", "billing"];
   const tx = db.transaction(stores, "readwrite");
   for (const s of stores) tx.objectStore(s).clear();
   return txPromise(tx);
@@ -131,10 +143,87 @@ function parseLossCell(v) {
   return 0;
 }
 
+// EDP indexed-tariff price formula (from the ELE_DINAMICA sheet):
+//   invoice = Σi (POMIE_i × (1+Perdas_i) × K1 + K2 + TAR_energia) × Consumo_i
+//           + (K3 + TAR_potência) × nº days
+// Defaults below match the constants published in the reports; per-file values
+// parsed from ELE_DINAMICA override them.
+const DEFAULT_TARIFF = { k1: 1.08, k2: 0.0185, tarE: 0.0607, k3: 0.1171, tarP: 0.2291 };
+
+// Parse the ELE_DINAMICA billing-summary sheet: real invoiced amounts (before
+// taxes) plus the tariff constants. Returns null if the sheet is absent.
+function parseBillingSheet(wb, fileName) {
+  const sheetName = wb.SheetNames.find((n) => normalize(n).includes("dinamica"));
+  if (!sheetName) return null;
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, raw: true, defval: null });
+
+  let label = null;
+  let headerIdx = -1, cols = null;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i] || [];
+    row.forEach((cell, c) => {
+      if (cell !== null && normalize(cell) === "periodo de faturacao" && row[c + 1]) label = String(row[c + 1]);
+    });
+    const idx = {};
+    row.forEach((cell, c) => {
+      if (cell === null) return;
+      const t = normalize(cell);
+      if (t === "data inicio") idx.start = c;
+      else if (t === "data fim") idx.end = c;
+      else if (t.includes("dias")) idx.days = c;
+      else if (t.startsWith("consumo")) idx.kwh = c;
+      else if (t.includes("erse")) idx.k1 = c; // "(1+ Perdas ERSE i) x K1"
+      else if (t === "k2") idx.k2 = c;
+      else if (t === "k3") idx.k3 = c;
+      else if (t.includes("tarenergia")) idx.tarE = c;
+      else if (t.includes("tarpotencia")) idx.tarP = c;
+      else if (t.startsWith("fatura total")) idx.total = c;
+    });
+    if (idx.start !== undefined && idx.total !== undefined) { cols = idx; headerIdx = i; break; }
+  }
+  if (!cols) return null;
+
+  const b = { file: fileName, label, start: null, end: null, days: 0, billedKwh: 0, energyEur: 0, powerEur: 0, totalEur: 0 };
+  const grab = (row, key) => {
+    if (cols[key] === undefined || b[key] !== undefined) return;
+    const v = parseNumber(row[cols[key]]);
+    if (v !== null) b[key] = v;
+  };
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i] || [];
+    const total = parseNumber(row[cols.total]);
+    if (total === null) continue;
+    b.totalEur += total;
+    const start = parseDateCell(row[cols.start]);
+    const end = parseDateCell(row[cols.end]);
+    if (start && (!b.start || start < b.start)) b.start = start;
+    if (end && (!b.end || end > b.end)) b.end = end;
+    const kwh = parseNumber(row[cols.kwh]);
+    if (kwh !== null) { // energy line
+      b.billedKwh += kwh;
+      b.energyEur += total;
+      grab(row, "k1"); grab(row, "k2"); grab(row, "tarE");
+    } else { // power / fixed-charge line
+      b.powerEur += total;
+      const m = String(row[cols.days] ?? "").match(/(\d+)/);
+      if (m) b.days = Number(m[1]);
+      grab(row, "k3"); grab(row, "tarP");
+    }
+  }
+  return b.start ? b : null;
+}
+
 function parseWorkbook(arrayBuffer, fileName) {
   const wb = XLSX.read(arrayBuffer, { type: "array", cellDates: false });
   const sheetName = wb.SheetNames.find((n) => normalize(n).startsWith("pomie"));
   if (!sheetName) throw new Error(`${fileName}: no POMIE_* sheet found`);
+
+  const billing = parseBillingSheet(wb, fileName);
+  const tariff = {
+    k1: billing?.k1 ?? DEFAULT_TARIFF.k1,
+    k2: billing?.k2 ?? DEFAULT_TARIFF.k2,
+    tarE: billing?.tarE ?? DEFAULT_TARIFF.tarE,
+  };
 
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, raw: true, defval: null });
 
@@ -171,17 +260,21 @@ function parseWorkbook(arrayBuffer, fileName) {
     if (kwh === null) continue;
     const pomie = cols.pomie !== undefined ? parseNumber(row[cols.pomie]) : null;
     const loss = cols.loss !== undefined ? parseLossCell(row[cols.loss]) : 0;
-    const cost = pomie !== null ? kwh * (1 + loss) * (pomie / 1000) : null;
+    // Full energy component of the invoice (per kWh), before taxes.
+    const cost = pomie !== null
+      ? kwh * ((pomie / 1000) * (1 + loss) * tariff.k1 + tariff.k2 + tariff.tarE)
+      : null;
     records.push({ ts: `${date} ${time}`, date, time, kwh, pomie, loss, cost });
   }
   if (records.length === 0) throw new Error(`${fileName}: no readings found in sheet ${sheetName}`);
-  return records;
+  return { records, billing };
 }
 
 // ---------- State & formatting ----------
 
 let allReadings = [];
 let fileMetas = [];
+let billingMetas = []; // parsed ELE_DINAMICA invoice summaries, sorted by start date
 let currentPeriod = "all"; // "all" or a period key (see periodKeyOf)
 let periodMode = "month"; // "month" (calendar) or "billing" (25th → 24th, matches EDP invoices)
 let cmpSel = { a: null, b: null }; // compare-view period selection
@@ -254,8 +347,9 @@ async function ingestFiles(fileList) {
   for (const file of files) {
     try {
       const buf = await file.arrayBuffer();
-      const records = parseWorkbook(buf, file.name);
+      const { records, billing } = parseWorkbook(buf, file.name);
       await dbPutMany("readings", records);
+      if (billing) await dbPutMany("billing", [billing]);
       const dates = records.map((r) => r.date);
       await dbPutMany("files", [{
         name: file.name,
@@ -312,6 +406,8 @@ async function reload() {
   allReadings.sort((a, b) => (a.ts < b.ts ? -1 : 1));
   fileMetas = await dbGetAll("files");
   fileMetas.sort((a, b) => (a.from < b.from ? -1 : 1));
+  billingMetas = await dbGetAll("billing");
+  billingMetas.sort((a, b) => (a.start < b.start ? -1 : 1));
   tagsMap = new Map((await dbGetAll("tags")).map((t) => [t.date, t]));
   weatherMap = new Map((await dbGetAll("weather")).map((w) => [w.date, w.tmean]));
 
@@ -342,6 +438,7 @@ async function reload() {
 
   renderPeriodChips(periods);
   renderKpis();
+  renderBilling();
   renderMonthlyChart(periods);
   renderHourlyChart();
   renderDailyChart();
@@ -375,6 +472,23 @@ function renderPeriodChips(periods) {
   };
   mk("all", "All history");
   periods.forEach((p) => mk(p, periodLabelOf(p)));
+}
+
+// Tariff constants for display/estimates: latest parsed invoice wins, defaults otherwise.
+function activeTariff() {
+  const b = billingMetas[billingMetas.length - 1];
+  return {
+    k1: b?.k1 ?? DEFAULT_TARIFF.k1,
+    k2: b?.k2 ?? DEFAULT_TARIFF.k2,
+    tarE: b?.tarE ?? DEFAULT_TARIFF.tarE,
+    k3: b?.k3 ?? DEFAULT_TARIFF.k3,
+    tarP: b?.tarP ?? DEFAULT_TARIFF.tarP,
+  };
+}
+
+function fixedDailyEur() {
+  const t = activeTariff();
+  return t.k3 + t.tarP;
 }
 
 function renderKpis() {
@@ -413,7 +527,7 @@ function renderKpis() {
   document.getElementById("kpi-avg-day").textContent = `${fmtKwh2.format(days ? totalKwh / days : 0)} kWh`;
   document.getElementById("kpi-avg-night").textContent =
     `${fmtKwh.format(totalKwh ? (dayKwh / totalKwh) * 100 : 0)}% between 08:00–22:00`;
-  document.getElementById("kpi-cost").textContent = fmtEur.format(totalCost);
+  document.getElementById("kpi-cost").textContent = fmtEur.format(totalCost + days * fixedDailyEur());
   document.getElementById("kpi-price").innerHTML =
     totalKwh ? `${fmtEur4.format(totalCost / totalKwh)}<span class="unit">/kWh</span>` : "–";
   document.getElementById("kpi-pomie").textContent = `avg POMIE ${fmtKwh2.format(pomieAvg)} €/MWh`;
@@ -424,6 +538,43 @@ function renderKpis() {
   document.getElementById("kpi-base").textContent = `${Math.round(baseW)} W`;
   document.getElementById("kpi-base-sub").textContent =
     `≈ ${fmtKwh2.format(baseDailyKwh)} kWh/day · ${fmtKwh.format(basePct)}% of usage`;
+}
+
+// Real invoiced amounts (ELE_DINAMICA) vs the amounts recomputed from the
+// 15-min readings — a per-invoice reconciliation table.
+function renderBilling() {
+  const card = document.getElementById("billing-card");
+  if (!billingMetas.length) { card.hidden = true; return; }
+  card.hidden = false;
+
+  const t = activeTariff();
+  document.getElementById("billing-formula").innerHTML =
+    `Price formula from your reports: <strong>(POMIE × (1 + losses) × ${t.k1} + ${t.k2} + ${t.tarE}) €/kWh</strong>` +
+    ` for energy, plus <strong>${fmtEur4.format(t.k3 + t.tarP)}/day</strong> fixed (K3 + TAR potência).` +
+    ` Taxes, levies and IVA are not included — same basis as the report's "Fatura Total antes de Taxas e Impostos".`;
+
+  const tbody = document.querySelector("#billing-table tbody");
+  tbody.innerHTML = "";
+  for (const b of billingMetas) {
+    const recs = allReadings.filter((r) => r.date >= b.start && r.date <= b.end);
+    const kwh = recs.reduce((s, r) => s + r.kwh, 0);
+    const energy = recs.reduce((s, r) => s + (r.cost || 0), 0);
+    const fixed = ((b.k3 ?? t.k3) + (b.tarP ?? t.tarP)) * (b.days || 0);
+    const total = energy + fixed;
+    const delta = total - b.totalEur;
+    const cls = Math.abs(delta) < 0.5 ? "" : delta > 0 ? "delta-up" : "delta-down";
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${b.label || `${dateLabel(b.start)} → ${dateLabel(b.end)}`}</td>` +
+      `<td class="num">${b.days || "–"}</td>` +
+      `<td class="num">${fmtKwh.format(kwh)} / ${fmtKwh.format(b.billedKwh)}</td>` +
+      `<td class="num">${fmtEur.format(energy)}</td>` +
+      `<td class="num">${fmtEur.format(fixed)}</td>` +
+      `<td class="num">${fmtEur.format(total)}</td>` +
+      `<td class="num"><strong>${fmtEur.format(b.totalEur)}</strong></td>` +
+      `<td class="num ${cls}">${delta >= 0 ? "+" : ""}${fmtEur.format(delta)}</td>`;
+    tbody.appendChild(tr);
+  }
 }
 
 function upsertChart(id, config) {
@@ -437,7 +588,11 @@ const BLUE = "#2f6fed";
 function renderMonthlyChart(periods) {
   const byPeriod = groupBy(allReadings, (r) => periodKeyOf(r.date));
   const kwh = periods.map((p) => byPeriod.get(p)?.kwh ?? 0);
-  const cost = periods.map((p) => byPeriod.get(p)?.cost ?? 0);
+  const fd = fixedDailyEur();
+  const cost = periods.map((p) => {
+    const g = byPeriod.get(p);
+    return g ? g.cost + g.dates.size * fd : 0;
+  });
 
   upsertChart("chart-monthly", {
     data: {
@@ -449,7 +604,7 @@ function renderMonthlyChart(periods) {
           borderRadius: 6,
         },
         {
-          type: "line", label: "Cost (€)", data: cost, yAxisID: "y1",
+          type: "line", label: "Est. bill € (pre-tax)", data: cost, yAxisID: "y1",
           borderColor: BLUE, backgroundColor: BLUE, tension: 0.3, pointRadius: 4,
         },
       ],
@@ -839,7 +994,8 @@ function renderCompare(periods) {
     const kwh = recs.reduce((s, r) => s + r.kwh, 0);
     const cost = recs.reduce((s, r) => s + (r.cost || 0), 0);
     const days = new Set(recs.map((r) => r.date)).size;
-    return { recs, kwh, cost, days, perDay: days ? kwh / days : 0, price: kwh ? cost / kwh : 0 };
+    const bill = cost + days * fixedDailyEur();
+    return { recs, kwh, cost, bill, days, perDay: days ? kwh / days : 0, price: kwh ? cost / kwh : 0 };
   };
   const A = side(cmpSel.a), B = side(cmpSel.b);
 
@@ -852,8 +1008,8 @@ function renderCompare(periods) {
   document.getElementById("cmp-stats").innerHTML =
     stat("Total", A.kwh, B.kwh, (v) => `${fmtKwh.format(v)} kWh`) +
     stat("Average per day", A.perDay, B.perDay, (v) => `${fmtKwh2.format(v)} kWh`) +
-    stat("Estimated cost", A.cost, B.cost, (v) => fmtEur.format(v)) +
-    stat("Average price", A.price, B.price, (v) => fmtEur4.format(v));
+    stat("Estimated bill (pre-tax)", A.bill, B.bill, (v) => fmtEur.format(v)) +
+    stat("Average energy price", A.price, B.price, (v) => fmtEur4.format(v));
 
   const hours = [...Array(24).keys()];
   const profile = (recs) => {
@@ -953,11 +1109,12 @@ function renderFilesTable() {
 
 function exportBackup() {
   const payload = {
-    version: 2,
+    version: 3,
     exportedAt: new Date().toISOString(),
     files: fileMetas,
     readings: allReadings,
     tags: [...tagsMap.values()],
+    billing: billingMetas,
   };
   const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
   const a = document.createElement("a");
@@ -971,9 +1128,13 @@ async function importBackup(file) {
   try {
     const payload = JSON.parse(await file.text());
     if (!Array.isArray(payload.readings)) throw new Error("Invalid backup file");
+    if (!payload.version || payload.version < 3) {
+      throw new Error("backup predates the v3 cost-formula change — re-import the XLSX reports instead");
+    }
     await dbPutMany("readings", payload.readings);
     if (Array.isArray(payload.files)) await dbPutMany("files", payload.files);
     if (Array.isArray(payload.tags)) await dbPutMany("tags", payload.tags);
+    if (Array.isArray(payload.billing)) await dbPutMany("billing", payload.billing);
     await reload();
     toast(`Backup restored — ${fmtKwh.format(payload.readings.length)} readings merged.`);
   } catch (err) {

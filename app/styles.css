@@ -178,6 +178,9 @@ main { max-width: 1200px; margin: 24px auto; padding: 0 28px 60px; }
 .data-table th, .data-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .data-table th { color: var(--muted); font-weight: 500; font-size: 12px; }
 .data-table .num { font-variant-numeric: tabular-nums; }
+.data-table .delta-up { color: #c0392b; }
+.data-table .delta-down { color: #1e8e4e; }
+.table-scroll { overflow-x: auto; }
 .bar-cell { position: relative; }
 .bar-cell .bar {
   position: absolute;

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Energy Consumption Viewer</title>
+<title>EDP Dynamic Electricity — OMIE Billing Calculator &amp; Viewer</title>
 <link rel="stylesheet" href="styles.css">
 <script src="lib/xlsx.full.min.js"></script>
 <script src="lib/chart.umd.min.js"></script>
@@ -14,7 +14,7 @@
 <header>
   <div class="header-inner">
     <div>
-      <h1>⚡ Energy Consumption Viewer</h1>
+      <h1>⚡ EDP Dynamic Electricity — OMIE Billing Calculator &amp; Viewer</h1>
       <p id="coverage" class="subtitle">No data yet — upload your EDP reports to get started.</p>
     </div>
     <div class="header-actions">
@@ -30,7 +30,7 @@
 <main>
   <div id="empty-state" class="dropzone" hidden>
     <div class="dz-icon">📄</div>
-    <p><strong>Drag &amp; drop your XLSX reports here</strong><br>or click to choose files. Every file with a <code>POMIE_*</code> tab is parsed and added to your history — re-uploading the same period is safe (duplicates are merged).</p>
+    <p><strong>Drag &amp; drop your EDP XLSX reports here</strong><br>or click to choose files. The <code>POMIE_*</code> tab (15-min readings) and the <code>ELE_DINAMICA</code> tab (real invoiced amounts &amp; tariff constants) are both parsed — re-uploading the same period is safe (duplicates are merged).</p>
   </div>
 
   <div id="dashboard" hidden>
@@ -51,10 +51,21 @@
     <section class="kpis">
       <div class="card kpi"><div class="kpi-label">Total consumption</div><div class="kpi-value" id="kpi-total">–</div><div class="kpi-sub" id="kpi-days">–</div></div>
       <div class="card kpi"><div class="kpi-label">Average per day</div><div class="kpi-value" id="kpi-avg-day">–</div><div class="kpi-sub" id="kpi-avg-night">–</div></div>
-      <div class="card kpi"><div class="kpi-label">Estimated energy cost</div><div class="kpi-value" id="kpi-cost">–</div><div class="kpi-sub">OMIE × (1 + losses), excl. grid tariffs &amp; fees</div></div>
-      <div class="card kpi"><div class="kpi-label">Average price paid</div><div class="kpi-value" id="kpi-price">–</div><div class="kpi-sub" id="kpi-pomie">–</div></div>
+      <div class="card kpi"><div class="kpi-label">Estimated bill (pre-tax)</div><div class="kpi-value" id="kpi-cost">–</div><div class="kpi-sub">EDP price formula incl. TAR &amp; fixed daily, excl. taxes</div></div>
+      <div class="card kpi"><div class="kpi-label">Average energy price</div><div class="kpi-value" id="kpi-price">–</div><div class="kpi-sub" id="kpi-pomie">–</div></div>
       <div class="card kpi"><div class="kpi-label">Peak hour</div><div class="kpi-value" id="kpi-peak">–</div><div class="kpi-sub" id="kpi-peak-sub">–</div></div>
       <div class="card kpi"><div class="kpi-label">Base load (always-on)</div><div class="kpi-value" id="kpi-base">–</div><div class="kpi-sub" id="kpi-base-sub">–</div></div>
+    </section>
+
+    <section class="card" id="billing-card" hidden>
+      <h2>Your invoices — real vs recomputed <span class="hint">(from the ELE_DINAMICA tab, before taxes &amp; levies)</span></h2>
+      <p id="billing-formula" class="insight"></p>
+      <div class="table-scroll">
+        <table id="billing-table" class="data-table">
+          <thead><tr><th>Billing period</th><th>Days</th><th>kWh (calc / billed)</th><th>Energy €</th><th>Fixed €</th><th>Computed total</th><th>EDP invoice</th><th>Δ</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </section>
 
     <section class="grid-2">
@@ -82,7 +93,7 @@
       <div class="card">
         <h2>Top consumption days <span class="hint">(tag unusual days — e.g. EV charging — to exclude them from averages)</span></h2>
         <table id="top-days" class="data-table">
-          <thead><tr><th>Date</th><th>kWh</th><th>Est. cost</th><th>vs average</th><th></th></tr></thead>
+          <thead><tr><th>Date</th><th>kWh</th><th>Energy €</th><th>vs average</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
         <div class="tag-summary">

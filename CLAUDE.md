@@ -4,10 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A local, single-page web app that visualizes EDP (Portuguese electricity utility) energy
-consumption reports. Users drag-and-drop XLSX reports (each with a `POMIE_*` sheet of
-15-minute interval readings) onto the page; the app parses them client-side, stores all
-readings in IndexedDB, and renders a dashboard (KPIs, charts, heatmap, comparisons).
+A local, single-page web app: an OMIE billing calculator & viewer for EDP's (Portuguese
+electricity utility) dynamic indexed tariff. Users drag-and-drop EDP XLSX reports onto
+the page; each has a `POMIE_*` sheet of 15-minute interval readings and an `ELE_DINAMICA`
+sheet with the real invoiced amounts and tariff constants. The app parses both
+client-side, stores everything in IndexedDB, reconstructs the pre-tax invoice with EDP's
+price formula, and renders a dashboard (KPIs, invoice reconciliation, charts, heatmap,
+comparisons).
 There is no backend beyond a static file server, no build step, and no framework —
 plain JS/HTML/CSS plus two vendored libraries.
 
@@ -38,19 +41,29 @@ modules, no bundler):
 
 ### Data flow
 
-1. **Parsing** (`parseWorkbook` + helpers): an XLSX ArrayBuffer is read with SheetJS,
-   the sheet whose name starts with `pomie` is located, then the header row is found
-   by matching normalized column names (`Data`, `Período`, `POMIE`, `Perdas`, `Consumo`)
-   rather than fixed positions — reports' column order/formatting varies. Each data row
-   becomes a reading record: `{ ts, date, time, kwh, pomie, loss, cost }`, where `cost`
-   is computed inline (see Cost formula below).
-2. **Storage** (`openDB`/`dbPutMany`/`dbGetAll`/...): four IndexedDB object stores —
+1. **Parsing** (`parseWorkbook` + `parseBillingSheet` + helpers): an XLSX ArrayBuffer is
+   read with SheetJS. The sheet whose name starts with `pomie` provides the readings;
+   its header row is found by matching normalized column names (`Data`, `Período`,
+   `POMIE`, `Perdas`, `Consumo`) rather than fixed positions — reports' column
+   order/formatting varies. Each data row becomes a reading record:
+   `{ ts, date, time, kwh, pomie, loss, cost }`, where `cost` is computed inline with
+   the tariff constants (see Cost formula below). Beware: the POMIE sheet ends with a
+   summary row ("Preço OMIE médio global") whose `Consumo` cell holds the period
+   *total* kWh — it is skipped because it has no parseable date/time; any alternative
+   parsing must also skip it or totals double. The sheet whose name contains `dinamica` is
+   parsed by `parseBillingSheet` into a billing record: real invoiced amounts before
+   taxes (energy lines + power/fixed line), billing-period dates/days, and the tariff
+   constants (K1, K2, K3, TAR energia, TAR potência) — with `DEFAULT_TARIFF` as
+   fallback when a report lacks the sheet.
+2. **Storage** (`openDB`/`dbPutMany`/`dbGetAll`/...): five IndexedDB object stores —
    `readings` (keyed by `ts`, so re-importing the same file is idempotent/merges safely),
    `files` (import metadata for the "Imported reports" table), `tags` (user-marked
-   outlier days), `weather` (fetched daily mean temperatures, cached). No schema
-   migrations exist beyond `DB_VERSION` bumps in `openupgradeneeded`.
+   outlier days), `weather` (fetched daily mean temperatures, cached), `billing`
+   (parsed ELE_DINAMICA invoice summaries, keyed by period start date). The v3 upgrade
+   clears `readings`/`files` from older versions because the cost formula changed;
+   otherwise no schema migrations exist beyond `DB_VERSION` bumps.
 3. **State** (module-level `let`s near the top of the Aggregation section): `allReadings`,
-   `fileMetas`, `tagsMap`, `weatherMap` are the in-memory mirror of IndexedDB, refreshed
+   `fileMetas`, `billingMetas`, `tagsMap`, `weatherMap` are the in-memory mirror of IndexedDB, refreshed
    wholesale by `reload()` after every mutation. `currentPeriod`, `periodMode`, `cmpSel`,
    `excludeTagged` are UI/view state (the latter two persisted to `localStorage`).
 4. **Rendering**: `reload()` is the single entry point that re-fetches everything from
@@ -85,10 +98,23 @@ new period-bucketed feature should go through them rather than reimplementing th
 
 ### Cost formula
 
-`cost = kwh * (1 + loss) * (pomie / 1000)` per 15-minute reading — the OMIE-indexed
-energy component only. It intentionally excludes grid access tariffs, fixed charges,
-and taxes, so totals will not match the actual invoice. This is called out in the UI
-(KPI subtitle) — preserve that framing if you touch cost calculations.
+EDP's indexed-tariff price formula, as printed in the ELE_DINAMICA sheet:
+
+```
+invoice = Σi (POMIE_i × (1+Perdas_i) × K1 + K2 + TAR_energia) × Consumo_i
+        + (K3 + TAR_potência) × nº days
+```
+
+Per 15-minute reading: `cost = kwh * ((pomie/1000) * (1+loss) * K1 + K2 + TAR_energia)`
+(the energy component). The fixed daily component `(K3 + TAR_potência)` is added at
+display time (`fixedDailyEur()`) in the bill-estimate KPI, monthly chart cost line,
+compare view, and `renderBilling`. Constants come from the report's ELE_DINAMICA sheet
+(per-file for reading costs, latest via `activeTariff()` for display), falling back to
+`DEFAULT_TARIFF` (K1=1.08, K2=0.0185, TARe=0.0607, K3=0.1171, TARp=0.2291). This
+reconstructs the invoice's "Fatura Total antes de Taxas e Impostos" to within cents —
+verified in `renderBilling`, which shows real vs recomputed per invoice (and calc vs
+billed kWh, which also match). Taxes, levies and IVA are still excluded; preserve that
+framing in the UI.
 
 ### Base load estimate
 
